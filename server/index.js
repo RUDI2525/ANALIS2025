@@ -427,7 +427,7 @@ class CryptoTradingBotServer {
    */
   async startServer() {
     const port = process.env.PORT || 3001;
-    const host = process.env.HOST || 'localhost';
+    const host = process.env.HOST || '0.0.0.0';
 
     this.server = this.app.listen(port, host, () => {
       logger.info(`🚀 Enhanced Trading Bot Server running on ${host}:${port}`);
