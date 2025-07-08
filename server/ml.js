@@ -1,9 +1,22 @@
 import tf from '@tensorflow/tfjs';
-import { botState, CONFIG } from './index.js';
+import { botState, CONFIG, sendTelegramNotification } from './index.js';
 import { fetchHistoricalData } from './trading.js';
-import { sendTelegramNotification } from './utils/telegram.js';
-import { logger } from './utils/logger.js';
-import { CustomError } from './utils/errors.js';
+
+// Mock logger for compatibility
+const logger = {
+  info: console.log,
+  warn: console.warn,
+  error: console.error,
+  debug: console.debug
+};
+
+// Mock error classes
+class CustomError extends Error {
+  constructor(name, message) {
+    super(message);
+    this.name = name;
+  }
+}
 
 // Enhanced ML model configurations
 const MODEL_CONFIG = {

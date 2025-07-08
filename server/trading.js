@@ -1,15 +1,50 @@
-import { botState, CONFIG } from './index.js';
-import { createLogger } from './utils/logger.js';
-import { TelegramNotifier } from './utils/telegram.js';
-import { DatabaseManager } from './utils/database.js';
-import { RiskManager } from './utils/risk-manager.js';
-import { ValidationError, TradingError, ExchangeError } from './utils/errors.js';
+import { botState, CONFIG, sendTelegramNotification } from './index.js';
 
-// Initialize services
-const logger = createLogger('trading');
-const telegramNotifier = new TelegramNotifier();
-const dbManager = new DatabaseManager();
-const riskManager = new RiskManager();
+// Mock services for compatibility
+const logger = {
+  info: console.log,
+  warn: console.warn,
+  error: console.error,
+  debug: console.debug
+};
+
+const telegramNotifier = {
+  sendNotification: sendTelegramNotification,
+  sendAlert: sendTelegramNotification
+};
+
+const dbManager = {
+  cacheHistoricalData: async () => {},
+  getCachedHistoricalData: async () => null,
+  saveTrade: async () => {}
+};
+
+const riskManager = {
+  validateTrade: async () => ({ approved: true, reason: 'Mock validation' }),
+  calculatePositionSize: async () => 0.01
+};
+
+// Mock error classes
+class ValidationError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ValidationError';
+  }
+}
+
+class TradingError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'TradingError';
+  }
+}
+
+class ExchangeError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ExchangeError';
+  }
+}
 
 // Constants
 const TECHNICAL_INDICATORS = {

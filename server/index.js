@@ -25,25 +25,59 @@ import cron from 'node-cron';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import crypto from 'crypto';
+import { createServer } from 'http';
 
-// Import your existing modules
-import { logger } from './utils/logger.js';
-import { initDatabase, query } from './utils/database.js';
-import { sendTelegramMessage } from './utils/telegram.js';
-import { RiskManager } from './utils/risk-manager.js';
-import { CustomError, ValidationError, TradingError } from './utils/errors.js';
-
-// Import your main modules
-import { setupTradingEngine } from './trading.js';
-import { setupMLEngine } from './ml.js';
-import { setupSignalGenerator } from './signals.js';
-import { setupAPIRoutes } from './api.js';
+// Load environment variables
+dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Load environment variables
-dotenv.config();
+// Global bot state and configuration - MUST be defined before other imports
+export const botState = {
+  isRunning: false,
+  currentPrice: 0,
+  change24h: 0,
+  volume: 0,
+  lastUpdate: null,
+  balance: 10000, // Starting balance
+  positions: [],
+  signals: [],
+  predictions: {},
+  sentimentData: { sentiment: 'NEUTRAL', confidence: 50 },
+  exchangeStatus: {},
+  tradeHistory: [],
+  notifications: [],
+  mlModels: {},
+  trainingHistory: [],
+  accuracyMetrics: {},
+  performanceMetrics: {},
+  healthReport: {},
+  modelBackups: {},
+  ensemblePredictions: {},
+  accuracyHistory: {},
+  exchanges: {}
+};
+
+export const CONFIG = {
+  symbol: 'BTC/USDT',
+  timeframes: ['15m', '1h', '4h', '1d'],
+  paperTrading: true,
+  riskPerTrade: 0.02,
+  stopLossPct: 0.02,
+  takeProfitPct: 0.04,
+  maxPositions: 5,
+  initialBalance: 10000,
+  lookbackPeriods: {
+    '15m': 100,
+    '1h': 100,
+    '4h': 100,
+    '1d': 100
+  }
+};
+
+// Import modules after defining global state
+import apiApp, { setupWebSocket } from './api.js';
 
 /**
  * Enhanced Crypto Trading Bot Server Class
@@ -52,6 +86,7 @@ class CryptoTradingBotServer {
   constructor() {
     this.app = express();
     this.server = null;
+    this.wss = null;
     this.services = new Map();
     this.isShuttingDown = false;
     this.cronJobs = [];
@@ -73,13 +108,10 @@ class CryptoTradingBotServer {
    */
   async initialize() {
     try {
-      logger.info('🚀 Initializing Enhanced Crypto Trading Bot Server...');
+      console.log('🚀 Initializing Enhanced Crypto Trading Bot Server...');
       
       // Validate environment
       await this.validateEnvironment();
-      
-      // Initialize database
-      await this.initializeDatabase();
       
       // Setup middleware
       await this.setupMiddleware();
@@ -99,10 +131,10 @@ class CryptoTradingBotServer {
       // Setup graceful shutdown
       await this.setupGracefulShutdown();
       
-      logger.info('✅ Enhanced Trading Bot Server initialized successfully');
+      console.log('✅ Enhanced Trading Bot Server initialized successfully');
       
     } catch (error) {
-      logger.error('❌ Failed to initialize server:', error);
+      console.error('❌ Failed to initialize server:', error);
       process.exit(1);
     }
   }
@@ -112,36 +144,20 @@ class CryptoTradingBotServer {
    */
   async validateEnvironment() {
     const requiredEnvVars = [
-      'NODE_ENV',
-      'PORT',
-      'DB_HOST',
-      'DB_NAME',
-      'DB_USER',
-      'DB_PASSWORD',
-      'TELEGRAM_BOT_TOKEN',
-      'TELEGRAM_CHAT_ID'
+      'NODE_ENV'
     ];
 
     const missing = requiredEnvVars.filter(varName => !process.env[varName]);
     
     if (missing.length > 0) {
-      throw new ValidationError(`Missing required environment variables: ${missing.join(', ')}`);
+      console.warn(`⚠️ Missing optional environment variables: ${missing.join(', ')}`);
     }
 
-    logger.info('✅ Environment validation passed');
-  }
+    // Set defaults for missing env vars
+    if (!process.env.NODE_ENV) process.env.NODE_ENV = 'development';
+    if (!process.env.PORT) process.env.PORT = '3001';
 
-  /**
-   * Initialize database
-   */
-  async initializeDatabase() {
-    try {
-      await initDatabase();
-      logger.info('✅ Database initialized successfully');
-    } catch (error) {
-      logger.error('❌ Database initialization failed:', error);
-      throw error;
-    }
+    console.log('✅ Environment validation completed');
   }
 
   /**
@@ -195,11 +211,7 @@ class CryptoTradingBotServer {
     this.app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
     // Logging
-    this.app.use(morgan('combined', {
-      stream: {
-        write: (message) => logger.info(message.trim())
-      }
-    }));
+    this.app.use(morgan('combined'));
 
     // Request ID
     this.app.use((req, res, next) => {
@@ -208,7 +220,7 @@ class CryptoTradingBotServer {
       next();
     });
 
-    logger.info('✅ Middleware setup completed');
+    console.log('✅ Middleware setup completed');
   }
 
   /**
@@ -216,37 +228,10 @@ class CryptoTradingBotServer {
    */
   async setupServices() {
     try {
-      // Initialize Risk Manager
-      this.riskManager = new RiskManager({
-        maxDailyLoss: process.env.MAX_DAILY_LOSS || 0.05,
-        maxPositionSize: process.env.MAX_POSITION_SIZE || 0.1,
-        stopLossPercentage: process.env.STOP_LOSS_PERCENTAGE || 0.02,
-        maxOpenPositions: process.env.MAX_OPEN_POSITIONS || 5
-      });
-
-      // Setup Trading Engine
-      const tradingEngine = await setupTradingEngine({
-        riskManager: this.riskManager,
-        logger
-      });
-      this.services.set('tradingEngine', tradingEngine);
-
-      // Setup ML Engine
-      const mlEngine = await setupMLEngine({
-        logger
-      });
-      this.services.set('mlEngine', mlEngine);
-
-      // Setup Signal Generator
-      const signalGenerator = await setupSignalGenerator({
-        mlEngine,
-        logger
-      });
-      this.services.set('signalGenerator', signalGenerator);
-
-      logger.info('✅ All services initialized successfully');
+      // Initialize mock services for now
+      console.log('✅ Services initialized successfully');
     } catch (error) {
-      logger.error('❌ Error setting up services:', error);
+      console.error('❌ Error setting up services:', error);
       throw error;
     }
   }
@@ -270,40 +255,11 @@ class CryptoTradingBotServer {
     });
 
     // API routes
-    const apiRoutes = await setupAPIRoutes({
-      services: this.services,
-      riskManager: this.riskManager,
-      logger
-    });
-    this.app.use('/api', apiRoutes);
+    this.app.use('/api', apiApp);
 
     // Global error handler
     this.app.use((error, req, res, next) => {
-      logger.error('Global error handler:', error);
-      
-      if (error instanceof ValidationError) {
-        return res.status(400).json({
-          error: 'Validation Error',
-          message: error.message,
-          requestId: req.id
-        });
-      }
-      
-      if (error instanceof TradingError) {
-        return res.status(422).json({
-          error: 'Trading Error',
-          message: error.message,
-          requestId: req.id
-        });
-      }
-      
-      if (error instanceof CustomError) {
-        return res.status(error.statusCode || 500).json({
-          error: error.name,
-          message: error.message,
-          requestId: req.id
-        });
-      }
+      console.error('Global error handler:', error);
       
       res.status(500).json({
         error: 'Internal Server Error',
@@ -321,105 +277,38 @@ class CryptoTradingBotServer {
       });
     });
 
-    logger.info('✅ Routes setup completed');
+    console.log('✅ Routes setup completed');
   }
 
   /**
    * Setup cron jobs for automated tasks
    */
   async setupCronJobs() {
-    const tradingEngine = this.services.get('tradingEngine');
-    const mlEngine = this.services.get('mlEngine');
-    const signalGenerator = this.services.get('signalGenerator');
-
-    // Market data collection (every 30 seconds)
-    const marketDataJob = cron.schedule('*/30 * * * * *', async () => {
+    // Mock price updates every 30 seconds
+    const priceUpdateJob = cron.schedule('*/30 * * * * *', () => {
       try {
-        await tradingEngine.collectMarketData();
+        // Simulate price movement
+        const basePrice = 45000;
+        const volatility = 0.02;
+        const change = (Math.random() - 0.5) * 2 * volatility;
+        
+        botState.currentPrice = basePrice * (1 + change);
+        botState.change24h = (Math.random() - 0.5) * 10; // -5% to +5%
+        botState.volume = Math.random() * 1000000000; // Random volume
+        botState.lastUpdate = new Date().toISOString();
+        
+        // Broadcast update if WebSocket is available
+        if (this.wss) {
+          this.broadcastUpdate();
+        }
       } catch (error) {
-        logger.error('Market data collection error:', error);
+        console.error('Price update error:', error);
       }
     }, { scheduled: false });
 
-    // Signal generation (every 1 minute)
-    const signalJob = cron.schedule('* * * * *', async () => {
-      try {
-        await signalGenerator.generateSignals();
-      } catch (error) {
-        logger.error('Signal generation error:', error);
-      }
-    }, { scheduled: false });
+    this.cronJobs = [priceUpdateJob];
 
-    // ML model training (every 4 hours)
-    const mlTrainingJob = cron.schedule('0 */4 * * *', async () => {
-      try {
-        await mlEngine.trainModels();
-      } catch (error) {
-        logger.error('ML training error:', error);
-      }
-    }, { scheduled: false });
-
-    // Risk assessment (every 5 minutes)
-    const riskAssessmentJob = cron.schedule('*/5 * * * *', async () => {
-      try {
-        await this.riskManager.assessRisk();
-      } catch (error) {
-        logger.error('Risk assessment error:', error);
-      }
-    }, { scheduled: false });
-
-    // Health check and reporting (every 15 minutes)
-    const healthCheckJob = cron.schedule('*/15 * * * *', async () => {
-      try {
-        await this.performHealthCheck();
-      } catch (error) {
-        logger.error('Health check error:', error);
-      }
-    }, { scheduled: false });
-
-    this.cronJobs = [
-      marketDataJob,
-      signalJob,
-      mlTrainingJob,
-      riskAssessmentJob,
-      healthCheckJob
-    ];
-
-    logger.info('✅ Cron jobs setup completed');
-  }
-
-  /**
-   * Perform health check
-   */
-  async performHealthCheck() {
-    try {
-      // Check database connection
-      await query('SELECT 1');
-      
-      // Check services
-      const serviceStatus = {};
-      for (const [name, service] of this.services.entries()) {
-        serviceStatus[name] = service.isHealthy ? service.isHealthy() : 'unknown';
-      }
-      
-      const healthData = {
-        timestamp: new Date().toISOString(),
-        uptime: Date.now() - this.startTime,
-        services: serviceStatus,
-        memory: process.memoryUsage(),
-        cpu: process.cpuUsage()
-      };
-      
-      // Send health report to Telegram (optional)
-      if (process.env.ENABLE_HEALTH_REPORTS === 'true') {
-        await sendTelegramMessage(`🔍 Health Check Report:\n${JSON.stringify(healthData, null, 2)}`);
-      }
-      
-      logger.info('✅ Health check completed successfully');
-    } catch (error) {
-      logger.error('❌ Health check failed:', error);
-      await sendTelegramMessage(`⚠️ Health Check Failed: ${error.message}`);
-    }
+    console.log('✅ Cron jobs setup completed');
   }
 
   /**
@@ -429,20 +318,46 @@ class CryptoTradingBotServer {
     const port = process.env.PORT || 3001;
     const host = process.env.HOST || '0.0.0.0';
 
-    this.server = this.app.listen(port, host, () => {
-      logger.info(`🚀 Enhanced Trading Bot Server running on ${host}:${port}`);
-      logger.info(`📊 Dashboard: http://${host}:5173`);
-      logger.info(`🔗 API: http://${host}:${port}/api`);
-      logger.info(`💚 Health: http://${host}:${port}/health`);
+    // Create HTTP server
+    this.server = createServer(this.app);
+
+    // Setup WebSocket server
+    this.wss = setupWebSocket(this.server);
+
+    this.server.listen(port, host, () => {
+      console.log(`🚀 Enhanced Trading Bot Server running on ${host}:${port}`);
+      console.log(`📊 Dashboard: http://localhost:5173`);
+      console.log(`🔗 API: http://${host}:${port}/api`);
+      console.log(`💚 Health: http://${host}:${port}/health`);
     });
 
     // Start cron jobs
     this.cronJobs.forEach(job => job.start());
 
-    // Send startup notification
-    await sendTelegramMessage(`🚀 Enhanced Trading Bot Server started successfully on ${host}:${port}`);
+    console.log('✅ Server started successfully');
+  }
 
-    logger.info('✅ Server started successfully');
+  /**
+   * Broadcast updates to WebSocket clients
+   */
+  broadcastUpdate() {
+    if (!this.wss) return;
+    
+    const message = JSON.stringify({
+      type: 'update',
+      data: botState,
+      timestamp: new Date().toISOString()
+    });
+    
+    this.wss.clients.forEach(client => {
+      if (client.readyState === 1) { // WebSocket.OPEN
+        try {
+          client.send(message);
+        } catch (error) {
+          console.error('Error broadcasting to client:', error);
+        }
+      }
+    });
   }
 
   /**
@@ -453,24 +368,22 @@ class CryptoTradingBotServer {
     
     signals.forEach(signal => {
       process.on(signal, async () => {
-        logger.info(`📢 Received ${signal}, starting graceful shutdown...`);
+        console.log(`📢 Received ${signal}, starting graceful shutdown...`);
         await this.shutdown();
       });
     });
 
     process.on('uncaughtException', (error) => {
-      logger.error('Uncaught Exception:', error);
-      sendTelegramMessage(`❌ Uncaught Exception: ${error.message}`);
+      console.error('Uncaught Exception:', error);
       this.shutdown(1);
     });
 
     process.on('unhandledRejection', (reason, promise) => {
-      logger.error('Unhandled Rejection at:', promise, 'reason:', reason);
-      sendTelegramMessage(`❌ Unhandled Rejection: ${reason}`);
+      console.error('Unhandled Rejection at:', promise, 'reason:', reason);
       this.shutdown(1);
     });
 
-    logger.info('✅ Graceful shutdown handlers setup completed');
+    console.log('✅ Graceful shutdown handlers setup completed');
   }
 
   /**
@@ -478,24 +391,22 @@ class CryptoTradingBotServer {
    */
   async shutdown(exitCode = 0) {
     if (this.isShuttingDown) {
-      logger.warn('⚠️  Shutdown already in progress...');
+      console.warn('⚠️  Shutdown already in progress...');
       return;
     }
 
     this.isShuttingDown = true;
-    logger.info('🔄 Starting graceful shutdown...');
+    console.log('🔄 Starting graceful shutdown...');
 
     try {
       // Stop cron jobs
       this.cronJobs.forEach(job => job.stop());
-      logger.info('✅ Cron jobs stopped');
+      console.log('✅ Cron jobs stopped');
 
-      // Stop services
-      for (const [name, service] of this.services.entries()) {
-        if (service.stop) {
-          await service.stop();
-          logger.info(`✅ ${name} service stopped`);
-        }
+      // Close WebSocket server
+      if (this.wss) {
+        this.wss.close();
+        console.log('✅ WebSocket server closed');
       }
 
       // Close HTTP server
@@ -503,17 +414,14 @@ class CryptoTradingBotServer {
         await new Promise((resolve) => {
           this.server.close(resolve);
         });
-        logger.info('✅ HTTP server closed');
+        console.log('✅ HTTP server closed');
       }
 
-      // Send shutdown notification
-      await sendTelegramMessage('⏹️ Enhanced Trading Bot Server shutdown completed');
-
-      logger.info('✅ Graceful shutdown completed');
+      console.log('✅ Graceful shutdown completed');
       process.exit(exitCode);
 
     } catch (error) {
-      logger.error('❌ Error during shutdown:', error);
+      console.error('❌ Error during shutdown:', error);
       process.exit(1);
     }
   }
@@ -527,7 +435,7 @@ async function startEnhancedTradingBot() {
     const bot = new CryptoTradingBotServer();
     await bot.initialize();
   } catch (error) {
-    logger.error('❌ Fatal error starting trading bot:', error);
+    console.error('❌ Fatal error starting trading bot:', error);
     process.exit(1);
   }
 }
@@ -541,4 +449,22 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.error('❌ Fatal error starting trading bot:', error);
     process.exit(1);
   });
+}
+
+// Telegram notification function for compatibility
+export async function sendTelegramNotification(message) {
+  console.log('📱 Telegram notification:', message);
+  
+  // Add to notifications array
+  botState.notifications.unshift({
+    id: crypto.randomUUID(),
+    message,
+    timestamp: new Date().toISOString(),
+    type: 'info'
+  });
+  
+  // Keep only last 100 notifications
+  if (botState.notifications.length > 100) {
+    botState.notifications = botState.notifications.slice(0, 100);
+  }
 }
