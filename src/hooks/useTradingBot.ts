@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { io, Socket } from 'socket.io-client';
 
 interface TradingBotState {
   isRunning: boolean;
@@ -14,6 +15,7 @@ interface TradingBotState {
   notifications: any[];
   tradeHistory: any[];
   accuracyMetrics: any;
+  lastUpdate: string | null;
 }
 
 export function useTradingBot() {
@@ -30,80 +32,133 @@ export function useTradingBot() {
     exchangeStatus: {},
     notifications: [],
     tradeHistory: [],
-    accuracyMetrics: {}
+    accuracyMetrics: {},
+    lastUpdate: null
   });
 
   const [isConnected, setIsConnected] = useState(false);
-  const [ws, setWs] = useState<WebSocket | null>(null);
+  const [socket, setSocket] = useState<Socket | null>(null);
 
-  // Connect to WebSocket
+  // Connect to Socket.IO server
   useEffect(() => {
-    const connectWebSocket = () => {
-      const websocket = new WebSocket('ws://localhost:3001');
+    const newSocket = io('http://localhost:3001', {
+      transports: ['websocket', 'polling']
+    });
+    
+    newSocket.on('connect', () => {
+      console.log('✅ Connected to trading bot server');
+      setIsConnected(true);
       
-      websocket.onopen = () => {
-        console.log('WebSocket connected');
-        setIsConnected(true);
-      };
+      // Subscribe to all updates
+      newSocket.emit('subscribe', ['all']);
+    });
+    
+    newSocket.on('disconnect', () => {
+      console.log('❌ Disconnected from trading bot server');
+      setIsConnected(false);
+    });
+    
+    newSocket.on('state', (data) => {
+      console.log('📊 Received initial state:', data);
+      setState(data);
+    });
+    
+    newSocket.on('update', (update) => {
+      console.log('🔄 Received update:', update.type, update.data);
       
-      websocket.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.type === 'state' || data.type === 'update') {
-            setState(data.data);
-          }
-        } catch (error) {
-          console.error('Error parsing WebSocket message:', error);
-        }
-      };
-      
-      websocket.onclose = () => {
-        console.log('WebSocket disconnected');
-        setIsConnected(false);
-        // Reconnect after 3 seconds
-        setTimeout(connectWebSocket, 3000);
-      };
-      
-      websocket.onerror = (error) => {
-        console.error('WebSocket error:', error);
-        setIsConnected(false);
-      };
-      
-      setWs(websocket);
-    };
-
-    connectWebSocket();
-
-    return () => {
-      if (ws) {
-        ws.close();
+      switch (update.type) {
+        case 'priceUpdate':
+          setState(prev => ({
+            ...prev,
+            currentPrice: update.data.price,
+            change24h: update.data.percentage || 0,
+            volume: update.data.volume || 0,
+            lastUpdate: update.timestamp
+          }));
+          break;
+          
+        case 'signalsUpdate':
+          setState(prev => ({
+            ...prev,
+            signals: update.data
+          }));
+          break;
+          
+        case 'predictionsUpdate':
+          setState(prev => ({
+            ...prev,
+            predictions: update.data
+          }));
+          break;
+          
+        case 'portfolioUpdate':
+          setState(prev => ({
+            ...prev,
+            positions: update.data.positions || [],
+            balance: update.data.portfolioValue || prev.balance
+          }));
+          break;
+          
+        case 'tradeExecuted':
+          setState(prev => ({
+            ...prev,
+            tradeHistory: [update.data, ...prev.tradeHistory.slice(0, 99)]
+          }));
+          break;
+          
+        case 'botStarted':
+        case 'botStopped':
+          setState(prev => ({
+            ...prev,
+            isRunning: update.data.isRunning
+          }));
+          break;
+          
+        default:
+          console.log('Unknown update type:', update.type);
       }
+    });
+    
+    newSocket.on('connect_error', (error) => {
+      console.error('❌ Connection error:', error);
+      setIsConnected(false);
+    });
+    
+    setSocket(newSocket);
+    
+    return () => {
+      newSocket.close();
     };
   }, []);
 
-  // Fetch initial data
+  // Fetch initial dashboard data
   useEffect(() => {
-    const fetchData = async () => {
+    const fetchDashboardData = async () => {
       try {
         const response = await fetch('http://localhost:3001/api/dashboard');
-        const data = await response.json();
-        setState(prevState => ({
-          ...prevState,
-          ...data.status,
-          ...data.portfolio,
-          signals: data.signals || [],
-          predictions: data.predictions || {},
-          sentiment: data.sentiment || {},
-          exchanges: data.exchanges || {},
-          recentTrades: data.recentTrades || []
-        }));
+        if (response.ok) {
+          const data = await response.json();
+          setState(prev => ({
+            ...prev,
+            ...data.status,
+            positions: data.portfolio?.positions || [],
+            balance: data.portfolio?.portfolioValue || prev.balance,
+            signals: data.signals || [],
+            predictions: data.predictions || {},
+            sentimentData: data.sentiment || {},
+            exchangeStatus: data.exchanges || {},
+            tradeHistory: data.recentTrades || []
+          }));
+        }
       } catch (error) {
-        console.error('Error fetching dashboard data:', error);
+        console.error('❌ Error fetching dashboard data:', error);
       }
     };
 
-    fetchData();
-    const interval = setInterval(fetchData, 5000);
+    fetchDashboardData();
+    
+    // Fetch data every 30 seconds as fallback
+    const interval = setInterval(fetchDashboardData, 30000);
     return () => clearInterval(interval);
   }, []);
 
@@ -115,9 +170,13 @@ export function useTradingBot() {
           method: 'POST'
         });
         const data = await response.json();
-        setState(prev => ({ ...prev, isRunning: data.isRunning }));
+        if (data.success) {
+          setState(prev => ({ ...prev, isRunning: data.isRunning }));
+        }
+        return data;
       } catch (error) {
-        console.error('Error toggling bot:', error);
+        console.error('❌ Error toggling bot:', error);
+        throw error;
       }
     }, []),
 
@@ -127,9 +186,13 @@ export function useTradingBot() {
           method: 'POST'
         });
         const data = await response.json();
-        setState(prev => ({ ...prev, isRunning: data.isRunning }));
+        if (data.success) {
+          setState(prev => ({ ...prev, isRunning: data.isRunning }));
+        }
+        return data;
       } catch (error) {
-        console.error('Error starting bot:', error);
+        console.error('❌ Error starting bot:', error);
+        throw error;
       }
     }, []),
 
@@ -139,9 +202,13 @@ export function useTradingBot() {
           method: 'POST'
         });
         const data = await response.json();
-        setState(prev => ({ ...prev, isRunning: data.isRunning }));
+        if (data.success) {
+          setState(prev => ({ ...prev, isRunning: data.isRunning }));
+        }
+        return data;
       } catch (error) {
-        console.error('Error stopping bot:', error);
+        console.error('❌ Error stopping bot:', error);
+        throw error;
       }
     }, []),
 
@@ -157,52 +224,70 @@ export function useTradingBot() {
         const data = await response.json();
         return data;
       } catch (error) {
-        console.error('Error executing trade:', error);
+        console.error('❌ Error executing trade:', error);
         throw error;
       }
     }, []),
 
-    retrainModels: useCallback(async (timeframe?: string) => {
+    trainModel: useCallback(async (symbol?: string, timeframe?: string, modelType?: string) => {
       try {
-        const response = await fetch('http://localhost:3001/api/ml/retrain', {
+        const response = await fetch('http://localhost:3001/api/ml/train', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
           },
-          body: JSON.stringify({ timeframe })
+          body: JSON.stringify({ symbol, timeframe, modelType })
         });
         const data = await response.json();
         return data;
       } catch (error) {
-        console.error('Error retraining models:', error);
+        console.error('❌ Error training model:', error);
         throw error;
       }
     }, []),
 
-    generatePredictions: useCallback(async () => {
+    generatePredictions: useCallback(async (symbol?: string, timeframe?: string, modelType?: string) => {
       try {
         const response = await fetch('http://localhost:3001/api/ml/predict', {
-          method: 'POST'
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ symbol, timeframe, modelType })
         });
         const data = await response.json();
-        setState(prev => ({ ...prev, predictions: data.predictions }));
+        if (data.success && data.prediction) {
+          setState(prev => ({
+            ...prev,
+            predictions: {
+              ...prev.predictions,
+              [`${symbol || 'BTC/USDT'}_${timeframe || '1h'}`]: data.prediction
+            }
+          }));
+        }
         return data;
       } catch (error) {
-        console.error('Error generating predictions:', error);
+        console.error('❌ Error generating predictions:', error);
         throw error;
       }
     }, []),
 
-    generateSignals: useCallback(async () => {
+    generateSignals: useCallback(async (symbols?: string[]) => {
       try {
         const response = await fetch('http://localhost:3001/api/signals/generate', {
-          method: 'POST'
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ symbols })
         });
         const data = await response.json();
-        setState(prev => ({ ...prev, signals: data.signals }));
+        if (data.success) {
+          setState(prev => ({ ...prev, signals: data.signals }));
+        }
         return data;
       } catch (error) {
-        console.error('Error generating signals:', error);
+        console.error('❌ Error generating signals:', error);
         throw error;
       }
     }, []),
@@ -219,7 +304,7 @@ export function useTradingBot() {
         const data = await response.json();
         return data;
       } catch (error) {
-        console.error('Error sending telegram test:', error);
+        console.error('❌ Error sending telegram test:', error);
         throw error;
       }
     }, []),
@@ -236,7 +321,60 @@ export function useTradingBot() {
         const data = await response.json();
         return data;
       } catch (error) {
-        console.error('Error updating settings:', error);
+        console.error('❌ Error updating settings:', error);
+        throw error;
+      }
+    }, []),
+
+    getHistoricalData: useCallback(async (symbol: string, timeframe: string, limit?: number) => {
+      try {
+        const response = await fetch(
+          `http://localhost:3001/api/historical/${symbol}/${timeframe}?limit=${limit || 100}`
+        );
+        const data = await response.json();
+        return data;
+      } catch (error) {
+        console.error('❌ Error fetching historical data:', error);
+        throw error;
+      }
+    }, []),
+
+    getPositions: useCallback(async () => {
+      try {
+        const response = await fetch('http://localhost:3001/api/positions');
+        const data = await response.json();
+        setState(prev => ({ ...prev, positions: data }));
+        return data;
+      } catch (error) {
+        console.error('❌ Error fetching positions:', error);
+        throw error;
+      }
+    }, []),
+
+    getTrades: useCallback(async (limit?: number) => {
+      try {
+        const response = await fetch(`http://localhost:3001/api/trades?limit=${limit || 50}`);
+        const data = await response.json();
+        setState(prev => ({ ...prev, tradeHistory: data }));
+        return data;
+      } catch (error) {
+        console.error('❌ Error fetching trades:', error);
+        throw error;
+      }
+    }, []),
+
+    getSignals: useCallback(async (symbol?: string, timeframe?: string) => {
+      try {
+        const params = new URLSearchParams();
+        if (symbol) params.append('symbol', symbol);
+        if (timeframe) params.append('timeframe', timeframe);
+        
+        const response = await fetch(`http://localhost:3001/api/signals?${params}`);
+        const data = await response.json();
+        setState(prev => ({ ...prev, signals: data }));
+        return data;
+      } catch (error) {
+        console.error('❌ Error fetching signals:', error);
         throw error;
       }
     }, [])
@@ -245,6 +383,7 @@ export function useTradingBot() {
   return {
     state,
     actions,
-    isConnected
+    isConnected,
+    socket
   };
 }
